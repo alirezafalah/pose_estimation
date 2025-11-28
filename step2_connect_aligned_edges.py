@@ -61,7 +61,7 @@ def mask_blue_squares(image: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
         if hull_area == 0:
             continue
         solidity = area / hull_area
-        if solidity < 0.85:  # Should be mostly convex
+        if solidity < 0.95:  # Should be mostly convex
             continue
         
         # 3. Aspect ratio check - should be roughly square
@@ -70,13 +70,13 @@ def mask_blue_squares(image: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
         if width == 0 or height == 0:
             continue
         aspect_ratio = max(width, height) / min(width, height)
-        if aspect_ratio > 2.0:  # Allow some perspective distortion but not too much
+        if aspect_ratio > 2:  # Allow some perspective distortion but not too much
             continue
         
         # 4. Extent check - ratio of contour area to bounding box area
         x, y, w, h = cv2.boundingRect(contour)
         extent = area / (w * h)
-        if extent < 0.5:  # Should fill at least half the bounding box
+        if extent < 0.3:  # Should fill at least half the bounding box
             continue
         
         # 5. Perimeter check - for approximate square shape
@@ -95,7 +95,7 @@ def mask_blue_squares(image: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
         median_area = np.median(areas)
         # Keep only contours within 5x of median size
         filtered_contours = [c for c in filtered_contours 
-                           if 0.2 * median_area < cv2.contourArea(c) < 5 * median_area]
+                           if 0.7 * median_area < cv2.contourArea(c) < 1.5 * median_area]
     
     return blue_mask_clean, filtered_contours
 
