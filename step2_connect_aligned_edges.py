@@ -35,8 +35,8 @@ def mask_blue_squares(image: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
     
     # Mask for dark blue squares (from checker_generator.py: #00008B)
     # Stricter saturation and value range to avoid false positives
-    blue_lower = np.array([100, 140, 70])  # Higher saturation minimum, higher value minimum
-    blue_upper = np.array([130, 255, 130])  # Lower value maximum to focus on darker blues
+    blue_lower = np.array([95, 140, 70])  # Higher saturation minimum, higher value minimum
+    blue_upper = np.array([120, 255, 130])  # Lower value maximum to focus on darker blues
     blue_mask = cv2.inRange(hsv, blue_lower, blue_upper)
     
     # Clean up mask
@@ -52,7 +52,7 @@ def mask_blue_squares(image: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
         area = cv2.contourArea(contour)
         
         # 1. Basic area filter
-        if area < 500 or area > 50000:
+        if area < 10000 or area > 34000:
             continue
         
         # 2. Convexity check - checkerboard squares should be convex
