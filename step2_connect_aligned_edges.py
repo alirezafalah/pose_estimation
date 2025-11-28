@@ -34,8 +34,9 @@ def mask_blue_squares(image: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     
     # Mask for dark blue squares (from checker_generator.py: #00008B)
-    blue_lower = np.array([100, 100, 50])
-    blue_upper = np.array([130, 255, 150])
+    # Stricter saturation and value range to avoid false positives
+    blue_lower = np.array([100, 140, 70])  # Higher saturation minimum, higher value minimum
+    blue_upper = np.array([130, 255, 130])  # Lower value maximum to focus on darker blues
     blue_mask = cv2.inRange(hsv, blue_lower, blue_upper)
     
     # Clean up mask
