@@ -114,23 +114,29 @@ class PoseEstimationPipeline:
         # Panel 1: Original Image
         v1 = image.copy()
         
-        # Panel 2: Normal Axis Fit Points Only
+        # Panel 2: Normal Axis Fit Points + Curve
         v2 = base_vis.copy()
         fit_points_normal = results.get('fit_points_normal', [])
+        curve_normal = results.get('curve_normal', np.array([]))
         for pt in fit_points_normal:
             cv2.circle(v2, tuple(pt.astype(int)), 5, (0, 255, 0), -1)
+        if len(curve_normal) > 0:
+            cv2.polylines(v2, [curve_normal], False, (0, 255, 0), 2, cv2.LINE_AA)
         
-        # Panel 3: Tangent Axis Fit Points Only
+        # Panel 3: Tangent Axis Fit Points + Curve
         v3 = base_vis.copy()
         fit_points_tangent = results.get('fit_points_tangent', [])
+        curve_tangent = results.get('curve_tangent', np.array([]))
         for pt in fit_points_tangent:
             cv2.circle(v3, tuple(pt.astype(int)), 5, (255, 0, 255), -1)
+        if len(curve_tangent) > 0:
+            cv2.polylines(v3, [curve_tangent], False, (255, 0, 255), 2, cv2.LINE_AA)
         
         # Create grid with labels
         row = np.hstack([
             add_label_to_image(v1, "1. Original Image"),
-            add_label_to_image(v2, "2. Normal Axis Points (Green)"),
-            add_label_to_image(v3, "3. Tangent Axis Points (Magenta)")
+            add_label_to_image(v2, "2. Normal Axis (Green)"),
+            add_label_to_image(v3, "3. Tangent Axis (Magenta)")
         ])
         
         return row

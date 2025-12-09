@@ -1,7 +1,7 @@
 """
 Curve Fitting Module
 
-Fits curves along grid edges and builds complete gridlines layer by layer.
+Fits curves along grid edges using Bezier curve interpolation.
 """
 
 import cv2
@@ -12,6 +12,64 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
 from config import PipelineConfig
+
+
+def bezier_curve_through_points(points, num_samples=100):
+    """
+    Create a smooth Bezier curve that passes through all given points.
+    Uses a series of connected cubic Bezier segments.
+    
+    Args:
+        points: Array of (x, y) points
+        num_samples: Number of points to sample along the curve
+        
+    Returns:
+        Array of (x, y) points along the curve
+    """
+    if len(points) < 2:
+        return points
+    
+    if len(points) == 2:
+        # Linear interpolation for 2 points
+        t = np.linspace(0, 1, num_samples)
+        curve = np.outer(1-t, points[0]) + np.outer(t, points[1])
+        return curve
+    
+    # For 3+ points, use cubic Bezier interpolation through each point
+    # Generate control points using Catmull-Rom style
+    curve_points = []
+    
+    for i in range(len(points) - 1):
+        p0 = points[max(0, i-1)]
+        p1 = points[i]
+        p2 = points[i+1]
+        p3 = points[min(len(points)-1, i+2)]
+        
+        # Calculate control points for cubic Bezier
+        # This ensures the curve passes through p1 and p2
+        cp1 = p1 + (p2 - p0) / 6.0
+        cp2 = p2 - (p3 - p1) / 6.0
+        
+        # Sample this segment with minimum 5 samples to ensure visibility
+        segment_samples = max(5, num_samples // (len(points) - 1))
+        
+        # For first segment, include start point; for last segment, include end point
+        if i == 0:
+            t = np.linspace(0, 1, segment_samples, endpoint=False)
+        elif i == len(points) - 2:
+            t = np.linspace(0, 1, segment_samples, endpoint=True)
+        else:
+            t = np.linspace(0, 1, segment_samples, endpoint=False)
+        
+        # Cubic Bezier formula: B(t) = (1-t)³P₀ + 3(1-t)²tP₁ + 3(1-t)t²P₂ + t³P₃
+        for t_val in t:
+            b = (1-t_val)**3 * p1 + \
+                3 * (1-t_val)**2 * t_val * cp1 + \
+                3 * (1-t_val) * t_val**2 * cp2 + \
+                t_val**3 * p2
+            curve_points.append(b)
+    
+    return np.array(curve_points)
 
 
 class CurveFitter:
@@ -232,51 +290,34 @@ class CurveFitter:
                 mid = (e[0] + e[1]) / 2
                 fit_points.append(mid)
         
-        # Fit polynomial curve
+        # Fit curve through points ordered along the axis
         curve_points = np.array([])
         
         if len(fit_points) >= 2:
             pts = np.array(fit_points)
             
-            if axis_type == 'normal':
-                # Vertical axis: fit X = f(Y)
-                x = pts[:, 0]
-                y = pts[:, 1]
-                
-                # Sort by Y
-                order = np.argsort(y)
-                x, y = x[order], y[order]
-                
-                try:
-                    poly = np.polyfit(y, x, self.config['POLY_DEGREE'])
-                    f = np.poly1d(poly)
-                    
-                    y_range = np.linspace(y[0], y[-1], self.config['SAMPLE_POINTS'])
-                    x_range = f(y_range)
-                    
-                    curve_points = np.column_stack((x_range, y_range)).astype(np.int32)
-                except:
-                    pass
+            # Order points by their distance along the axis line
+            # Project each point onto the axis to get 1D coordinate along it
+            axis_start = axis_points[0]  # First point of the axis
+            axis_dir = ref_vec / (np.linalg.norm(ref_vec) + 1e-9)
             
-            else:  # tangent
-                # Horizontal axis: fit Y = f(X)
-                x = pts[:, 0]
-                y = pts[:, 1]
-                
-                # Sort by X
-                order = np.argsort(x)
-                x, y = x[order], y[order]
-                
-                try:
-                    poly = np.polyfit(x, y, self.config['POLY_DEGREE'])
-                    f = np.poly1d(poly)
-                    
-                    x_range = np.linspace(x[0], x[-1], self.config['SAMPLE_POINTS'])
-                    y_range = f(x_range)
-                    
-                    curve_points = np.column_stack((x_range, y_range)).astype(np.int32)
-                except:
-                    pass
+            # Calculate distance along axis for each fit point
+            distances = []
+            for pt in pts:
+                vec_to_pt = pt - axis_start
+                dist_along_axis = np.dot(vec_to_pt, axis_dir)
+                distances.append(dist_along_axis)
+            
+            # Sort points by distance along axis
+            order = np.argsort(distances)
+            sorted_pts = pts[order]
+            
+            try:
+                # Use Bezier curve interpolation through all points
+                curve_points = bezier_curve_through_points(sorted_pts, self.config['SAMPLE_POINTS'])
+                curve_points = curve_points.astype(np.int32)
+            except:
+                pass
         
         return fit_points, curve_points
     
