@@ -274,15 +274,57 @@ def main():
         cv2.putText(vis, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3)
         cv2.putText(vis, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-        out_path = output_dir / f"{image_path.stem}_corners.jpg"
-        cv2.imwrite(str(out_path), vis)
-
-        print(f"[{idx}/{len(image_paths)}] {image_path.name}: {len(corners)} corners. Saved {out_path.name}")
-
-        # Save masks for inspection (only for images, not directories with many files)
-        for color, mask in masks.items():
-            mask_path = output_dir / f"{image_path.stem}_mask_{color}.png"
-            cv2.imwrite(str(mask_path), mask)
+        # Create 2x2 grid: [raw | red mask]
+        #                  [yellow mask | corners]
+        h, w = image.shape[:2]
+        mask_red = masks.get('red', np.zeros((h, w), dtype=np.uint8))
+        mask_yellow = masks.get('yellow', np.zeros((h, w), dtype=np.uint8))
+        
+        # Convert masks to 3-channel for display
+        mask_red_3ch = cv2.cvtColor(mask_red, cv2.COLOR_GRAY2BGR)
+        mask_yellow_3ch = cv2.cvtColor(mask_yellow, cv2.COLOR_GRAY2BGR)
+        
+        # Add legends to each image
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        thickness = 2
+        
+        # Raw image legend
+        raw_with_legend = image.copy()
+        cv2.putText(raw_with_legend, "RAW IMAGE", (20, 50), font, font_scale, (255, 255, 255), thickness + 2)
+        cv2.putText(raw_with_legend, "RAW IMAGE", (20, 50), font, font_scale, (0, 255, 0), thickness)
+        
+        # Red mask legend
+        cv2.putText(mask_red_3ch, "RED MASK", (20, 50), font, font_scale, (255, 255, 255), thickness + 2)
+        cv2.putText(mask_red_3ch, "RED MASK", (20, 50), font, font_scale, (0, 0, 255), thickness)
+        
+        # Yellow mask legend
+        cv2.putText(mask_yellow_3ch, "YELLOW MASK", (20, 50), font, font_scale, (255, 255, 255), thickness + 2)
+        cv2.putText(mask_yellow_3ch, "YELLOW MASK", (20, 50), font, font_scale, (0, 255, 255), thickness)
+        
+        # Corners legend (already has status text)
+        cv2.putText(vis, "CORNERS", (20, 80), font, font_scale, (255, 255, 255), thickness + 2)
+        cv2.putText(vis, "CORNERS", (20, 80), font, font_scale, (0, 255, 0), thickness)
+        
+        # Create separator lines
+        sep_v_thickness = 4
+        sep_h_thickness = 4
+        separator_v = np.ones((h, sep_v_thickness, 3), dtype=np.uint8) * 255
+        separator_h = np.ones((sep_h_thickness, w * 2 + sep_v_thickness, 3), dtype=np.uint8) * 255
+        
+        # Create top row: raw | red mask
+        top_row = np.hstack([raw_with_legend, separator_v, mask_red_3ch])
+        
+        # Create bottom row: yellow mask | corners
+        bottom_row = np.hstack([mask_yellow_3ch, separator_v, vis])
+        
+        # Stack rows with horizontal separator
+        grid = np.vstack([top_row, separator_h, bottom_row])
+        
+        grid_path = output_dir / f"{image_path.stem}_grid.jpg"
+        cv2.imwrite(str(grid_path), grid)
+        
+        print(f"[{idx}/{len(image_paths)}] {image_path.name}: {len(corners)} corners. Saved {grid_path.name}")
 
     print(f"\nResults saved to: {output_dir}")
 
