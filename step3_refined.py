@@ -1,198 +1,181 @@
 """
-Checkerboard Reconstruction - Step 3
-Robust Color Segmentation & Square Extraction.
-- Widened HSV ranges for better Cyan detection.
-- Dynamic filtering (Solidity, Convexity, Area).
-- Extracts square corners/edges for Step 4.
+Checkerboard Reconstruction - Step 3 (Geometric & Erosion Pipeline)
+Pipeline:
+1. Color Threshold -> 2. Erosion (Separation) -> 3. Geometric Filter (4-Corners)
+Visualizes every step in a 2x3 grid to debug exactly where detection fails.
 """
 
 import cv2
 import numpy as np
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
 
-# --- 1. Tuned Color Definitions ---
-class GridColors:
-    # Tuned for printed materials which might be washed out or tinted
-    CYAN = {
-        'name': 'cyan',
-        # H: 75-105 (Allows drift to Green/Blue)
-        # S: > 50 (Allows washed out colors)
-        # V: > 60 (Must be somewhat bright)
-        'lower': np.array([75, 50, 60]),  
-        'upper': np.array([105, 255, 255])
+# ==========================================
+#               CONFIGURATION
+# ==========================================
+CONFIG = {
+    # 1. COLOR SETTINGS (Blue/Magenta)
+    'COLOR': {
+        'LOWER': np.array([125, 60, 60]),
+        'UPPER': np.array([155, 255, 255]),
+        'SATURATION_BOOST': 1.5
+    },
+
+    # 2. SEPARATION (Erosion)
+    # Toggle 'ENABLED' to False to see what happens without erosion
+    'EROSION': {
+        'ENABLED': True,
+        'ITERATIONS': 2,      # Higher = more separation (smaller squares)
+        'KERNEL_SIZE': 3      # 3x3 is standard
+    },
+
+    # 3. GEOMETRIC FILTER (Shape Validation)
+    # Ensures the blob is actually a square/rectangle
+    'GEOMETRY': {
+        'ENABLED': True,
+        'MIN_CORNERS': 4,     # Must have 4 corners
+        'MAX_CORNERS': 4,     # Strictly 4 (Change to 5 or 6 if noisy)
+        'APPROX_EPSILON': 0.04, # Precision: 0.04 = 4% error allowed (Standard for squares)
+        'MIN_AREA': 50,       # Ignore tiny noise specks
+        'CONVEXITY': True     # Squares must be convex (no dents)
     }
-    
-    BLUE_MAGENTA = {
-        'name': 'blue_magenta',
-        # H: 125-155 (Centered around 135/Purple)
-        'lower': np.array([125, 60, 60]), 
-        'upper': np.array([155, 255, 255])
-    }
+}
 
-# --- 2. Helper Functions (Your Logic + Improvements) ---
+def preprocess_image(image: np.ndarray) -> np.ndarray:
+    """Convert to HSV and boost saturation."""
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * CONFIG['COLOR']['SATURATION_BOOST'], 0, 255)
+    return hsv.astype(np.uint8)
 
-def get_square_corners(contour: np.ndarray) -> np.ndarray:
-    """Extracts 4 corners from a contour, ordered CCW from Top-Left."""
-    peri = cv2.arcLength(contour, True)
-    approx = cv2.approxPolyDP(contour, 0.04 * peri, True) # Increased epsilon slightly for robustness
-    
-    if len(approx) == 4:
-        corners = approx.reshape(-1, 2).astype(np.float32)
-    else:
-        rect = cv2.minAreaRect(contour)
-        corners = cv2.boxPoints(rect).astype(np.float32)
-    
-    # Order corners consistently (CCW)
-    # 1. Sort by Y to find top/bottom
-    corners = corners[np.argsort(corners[:, 1])]
-    top = corners[:2]
-    bottom = corners[2:]
-    
-    # 2. Sort top by X to get TL, TR
-    tl, tr = top[np.argsort(top[:, 0])]
-    # 3. Sort bottom by X to get BL, BR
-    bl, br = bottom[np.argsort(bottom[:, 0])]
-    
-    # Return in order: TL, BL, BR, TR (CCW order can vary, let's stick to TL -> BL -> BR -> TR for consistency?)
-    # Actually, standard is usually circular: TL -> TR -> BR -> BL. 
-    # Let's use the geometric sort to be safe:
-    return np.array([tl, tr, br, bl], dtype=np.float32)
+def apply_geometric_filter(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Filters contours to ensure they are 4-sided polygons.
+    Returns:
+        valid_mask: The clean mask with only squares.
+        rejected_mask: Mask of blobs that failed the test (for debugging).
+    """
+    if not CONFIG['GEOMETRY']['ENABLED']:
+        return mask, np.zeros_like(mask)
 
-def filter_contours(contours: List[np.ndarray], img_area: int) -> List[np.ndarray]:
-    """Applies robust geometric filters to identify grid squares."""
-    valid_contours = []
-    
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        
-        # 1. Dynamic Area Filter (0.01% to 10% of image)
-        # Adjust these percentages based on your actual square size
-        if area < (img_area * 0.0005) or area > (img_area * 0.1):
-            continue
-
-        # 2. Convexity (Solid shapes)
-        hull = cv2.convexHull(contour)
-        hull_area = cv2.contourArea(hull)
-        if hull_area == 0: continue
-        solidity = area / hull_area
-        if solidity < 0.85: # Relaxed slightly for distortion
-            continue
-            
-        # 3. Aspect Ratio (Relaxed for perspective)
-        rect = cv2.minAreaRect(contour)
-        w, h = rect[1]
-        if w == 0 or h == 0: continue
-        ar = max(w, h) / min(w, h)
-        if ar > 3.0: # Allow heavy distortion (squares looking like trapezoids)
-            continue
-            
-        valid_contours.append(contour)
-
-    # 4. Statistical Outlier Removal (Median Area)
-    if len(valid_contours) > 2:
-        areas = [cv2.contourArea(c) for c in valid_contours]
-        median_area = np.median(areas)
-        # Keep squares that are roughly the same size (0.5x to 2.0x median)
-        valid_contours = [c for c in valid_contours 
-                          if 0.4 * median_area < cv2.contourArea(c) < 2.5 * median_area]
-                          
-    return valid_contours
-
-def create_mask_and_detect(hsv: np.ndarray, color_def: dict, img_area: int) -> Tuple[np.ndarray, List[np.ndarray]]:
-    """Generates mask and returns filtered contours."""
-    # 1. Threshold
-    mask = cv2.inRange(hsv, color_def['lower'], color_def['upper'])
-    
-    # 2. Morphology (Clean noise)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2) # Fill holes strongly
-    
-    # 3. Find Contours
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    # 4. Filter
-    filtered = filter_contours(contours, img_area)
+    valid_mask = np.zeros_like(mask)
+    rejected_mask = np.zeros_like(mask)
     
-    # 5. Redraw mask with ONLY valid contours (removes noise blobs permanently)
-    clean_mask = np.zeros_like(mask)
-    cv2.drawContours(clean_mask, filtered, -1, 255, -1)
-    
-    return clean_mask, filtered
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < CONFIG['GEOMETRY']['MIN_AREA']:
+            continue # Too small to even track as rejected
 
-def process_image_step3(path: Path) -> np.ndarray:
+        # Approximate the polygon (simplifies jagged edges from erosion)
+        peri = cv2.arcLength(cnt, True)
+        epsilon = CONFIG['GEOMETRY']['APPROX_EPSILON'] * peri
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        
+        is_square = True
+        
+        # Check 1: Corner Count
+        if not (CONFIG['GEOMETRY']['MIN_CORNERS'] <= len(approx) <= CONFIG['GEOMETRY']['MAX_CORNERS']):
+            is_square = False
+            
+        # Check 2: Convexity (squares can't be "caved in")
+        if CONFIG['GEOMETRY']['CONVEXITY'] and not cv2.isContourConvex(approx):
+            is_square = False
+
+        if is_square:
+            cv2.drawContours(valid_mask, [cnt], -1, 255, -1)
+        else:
+            cv2.drawContours(rejected_mask, [cnt], -1, 255, -1)
+            
+    return valid_mask, rejected_mask
+
+def create_debug_grid(original, mask_raw, mask_eroded, mask_valid, mask_rejected, final_overlay):
+    """Creates a 2x3 visualization grid."""
+    h, w = original.shape[:2]
+    
+    def label_img(img, text, color=(255, 255, 255), bg=(0,0,0)):
+        # Convert grayscale masks to BGR for display
+        if len(img.shape) == 2:
+            vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        else:
+            vis = img.copy()
+            
+        cv2.rectangle(vis, (0, 0), (w, 50), bg, -1)
+        cv2.putText(vis, text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        return vis
+
+    # Row 1
+    p1 = label_img(original, "1. Original")
+    p2 = label_img(mask_raw, "2. Color Mask (Raw)", (255, 255, 0))
+    p3 = label_img(mask_eroded, f"3. Eroded (Iter={CONFIG['EROSION']['ITERATIONS']})", (0, 255, 255))
+    
+    # Row 2
+    p4 = label_img(mask_valid, "4. Geometric Filter (Valid)", (0, 255, 0))
+    p5 = label_img(mask_rejected, "5. Rejected (Failed Shape)", (0, 0, 255)) # Red text
+    p6 = label_img(final_overlay, "6. Final Result", (255, 0, 255))
+
+    # Stack
+    row1 = np.hstack([p1, p2, p3])
+    row2 = np.hstack([p4, p5, p6])
+    grid = np.vstack([row1, row2])
+    
+    # Resize
+    if grid.shape[1] > 2000:
+        scale = 2000 / grid.shape[1]
+        grid = cv2.resize(grid, None, fx=scale, fy=scale)
+        
+    return grid
+
+def process_image(path: Path, output_dir: Path):
     image = cv2.imread(str(path))
-    if image is None: return None
-    h, w = image.shape[:2]
-    img_area = h * w
-    
-    # Preprocess
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    # Saturation Boost (helps washed out cyan)
-    hsv = hsv.astype(np.float32)
-    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.5, 0, 255) 
-    hsv = hsv.astype(np.uint8)
-    
-    # Detect
-    cyan_mask, cyan_cnts = create_mask_and_detect(hsv, GridColors.CYAN, img_area)
-    blue_mask, blue_cnts = create_mask_and_detect(hsv, GridColors.BLUE_MAGENTA, img_area)
-    
-    # --- Visualization ---
-    vis = image.copy()
-    
-    # Draw Cyan Squares (Green outlines)
-    for c in cyan_cnts:
-        # Get corners just to visualize/verify the function works
-        corners = get_square_corners(c)
-        cv2.polylines(vis, [corners.astype(int)], True, (0, 255, 0), 2)
-        # Draw center
-        M = cv2.moments(c)
-        if M['m00'] != 0:
-            cx, cy = int(M['m10']/M['m00']), int(M['m01']/M['m00'])
-            cv2.circle(vis, (cx, cy), 2, (0, 255, 0), -1)
+    if image is None: return
 
-    # Draw Blue Squares (Magenta outlines)
-    for c in blue_cnts:
-        corners = get_square_corners(c)
-        cv2.polylines(vis, [corners.astype(int)], True, (255, 0, 255), 2)
-        M = cv2.moments(c)
-        if M['m00'] != 0:
-            cx, cy = int(M['m10']/M['m00']), int(M['m01']/M['m00'])
-            cv2.circle(vis, (cx, cy), 2, (255, 0, 255), -1)
+    # 1. Preprocess
+    hsv = preprocess_image(image)
 
-    # Stats
-    status = f"Cyan: {len(cyan_cnts)} | Blue: {len(blue_cnts)}"
-    cv2.putText(vis, status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 4)
-    cv2.putText(vis, status, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2)
-    
-    # Create Side-by-Side Debug View
-    # Left: Result, Right: Combined Mask
-    combined_mask = np.zeros_like(image)
-    combined_mask[cyan_mask > 0] = [255, 255, 0] # Cyan
-    combined_mask[blue_mask > 0] = [255, 0, 255] # Magenta
-    
-    return np.hstack([vis, combined_mask])
+    # 2. Raw Color Mask
+    mask_raw = cv2.inRange(hsv, CONFIG['COLOR']['LOWER'], CONFIG['COLOR']['UPPER'])
+
+    # 3. Apply Erosion
+    if CONFIG['EROSION']['ENABLED']:
+        kernel = np.ones((CONFIG['EROSION']['KERNEL_SIZE'], CONFIG['EROSION']['KERNEL_SIZE']), np.uint8)
+        mask_eroded = cv2.erode(mask_raw, kernel, iterations=CONFIG['EROSION']['ITERATIONS'])
+    else:
+        mask_eroded = mask_raw.copy()
+
+    # 4. Apply Geometric Filter
+    mask_valid, mask_rejected = apply_geometric_filter(mask_eroded)
+
+    # 5. Final Overlay
+    overlay = (image.astype(float) * 0.4).astype(np.uint8)
+    # Paint Valid Green
+    overlay[mask_valid > 0] = [0, 255, 0]
+    # Paint Rejected Red (faintly)
+    overlay[mask_rejected > 0] = [0, 0, 255]
+
+    # Build Grid
+    grid = create_debug_grid(image, mask_raw, mask_eroded, mask_valid, mask_rejected, overlay)
+
+    out_path = output_dir / f"{path.stem}_step3_grid.jpg"
+    cv2.imwrite(str(out_path), grid)
+    print(f"Saved: {out_path.name}")
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python step3_refined.py <image_directory>")
+        print("Usage: python step3_filtered_grid.py <image_directory>")
         sys.exit(1)
 
     input_dir = Path(sys.argv[1])
-    output_dir = input_dir / "step3_refined_results"
+    output_dir = input_dir / "step3_results"
     output_dir.mkdir(exist_ok=True)
 
-    image_files = sorted(list(input_dir.glob('*.jpg')) + list(input_dir.glob('*.png')))
-    print(f"Processing {len(image_files)} images...")
-    
-    for idx, img_path in enumerate(image_files, 1):
-        vis = process_image_step3(img_path)
-        if vis is not None:
-            out_path = output_dir / f"{img_path.stem}_refined.jpg"
-            cv2.imwrite(str(out_path), vis)
-            print(f"[{idx}] Saved {out_path.name}")
+    images = sorted(list(input_dir.glob('*.jpg')) + list(input_dir.glob('*.png')))
+    print(f"Processing {len(images)} images with CONFIG settings...")
+
+    for img in images:
+        process_image(img, output_dir)
+
+    print(f"\nResults saved to {output_dir}")
 
 if __name__ == "__main__":
     main()
