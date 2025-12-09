@@ -29,7 +29,7 @@ class CornerColors:
     YELLOW = {
         'name': 'yellow',
         'ranges': [
-            (np.array([35, 80, 70]), np.array([75, 255, 255]))
+            (np.array([25, 80, 70]), np.array([85, 255, 255]))
         ]
     }
 
@@ -102,8 +102,16 @@ class ColoredCornerDetector:
             return [], mask
 
         valid_contours.sort(key=cv2.contourArea, reverse=True)
+        
+        # Keep only the 2 largest contours
+        top_2 = valid_contours[:2]
+        
+        # Rebuild mask with only these 2 contours
+        filtered_mask = np.zeros(hsv_image.shape[:2], dtype=np.uint8)
+        cv2.drawContours(filtered_mask, top_2, -1, 255, -1)
+        
         results: List[Tuple[Tuple[int, int], float]] = []
-        for cnt in valid_contours[:max_regions]:
+        for cnt in top_2:
             M = cv2.moments(cnt)
             if M['m00'] == 0:
                 continue
@@ -112,7 +120,7 @@ class ColoredCornerDetector:
             area = float(cv2.contourArea(cnt))
             results.append(((cx, cy), area))
 
-        return results, mask
+        return results, filtered_mask
 
     def _filter_by_area_consistency(self, detections: List[Tuple[Tuple[int, int], float]], factor: float = 3.0) -> List[Tuple[Tuple[int, int], float]]:
         """Keep detections whose area is within a multiplicative factor of the median."""
