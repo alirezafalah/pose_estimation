@@ -1,11 +1,6 @@
 """
-Checkerboard Reconstruction - Step 4 (Debug Phase 1)
-Objective: Highlight the EDGES of the selected squares that are parallel to the Normal Axis.
-
-Logic:
-1. Identify squares touching the Normal Axis (BL -> TL).
-2. For each square, identify edges parallel to the global BL->TL vector.
-3. Draw these edges.
+Checkerboard Reconstruction - Step 4 (Separation Phase)
+Objective: Separate the parallel edges into two sets (Outer vs Inner) based on their position relative to the board center.
 """
 
 import cv2
@@ -20,10 +15,12 @@ from step3_refined import preprocess_image, get_contours_and_filter, CONFIG
 
 # --- VISUALIZATION CONFIG ---
 COLOR_BG_TINT = 0.3
-COLOR_SQUARE_CONTEXT = (50, 50, 50)   # Faint Gray (Ignored squares)
-COLOR_SQUARE_SELECTED = (0, 100, 0)   # Dark Green (Selected squares background)
-COLOR_EDGE_PARALLEL = (0, 255, 255)   # Cyan (The target edges)
-COLOR_AXIS_GUIDE = (255, 255, 255)    # White (The axis line)
+COLOR_SQUARE_CONTEXT = (50, 50, 50)     # Faint Gray (Ignored)
+COLOR_AXIS_GUIDE = (255, 255, 255)      # White
+
+# Set Colors
+COLOR_SET_OUTER = (255, 255, 0)   # Cyan (Outer/Border Edges)
+COLOR_SET_INNER = (255, 0, 255)   # Magenta (Inner Edges)
 
 def get_normal_axis_points(origin_pt, target_pt, origin_mask, target_mask, steps=100):
     """Generates points along the curved axis (Bezier)."""
@@ -46,11 +43,7 @@ def get_normal_axis_points(origin_pt, target_pt, origin_mask, target_mask, steps
     return np.array(curve_points, dtype=np.float32)
 
 def get_parallel_edges(square_cnt, reference_vec):
-    """
-    Returns a list of edges (p1, p2) from the square that are parallel 
-    to the reference_vec.
-    """
-    # 1. Get 4 corners
+    """Returns edges parallel to reference vector."""
     peri = cv2.arcLength(square_cnt, True)
     approx = cv2.approxPolyDP(square_cnt, 0.04 * peri, True)
     
@@ -60,14 +53,11 @@ def get_parallel_edges(square_cnt, reference_vec):
     else:
         pts = approx.reshape(4, 2).astype(np.float32)
 
-    # Normalize reference vector
     ref_len = np.linalg.norm(reference_vec)
     if ref_len == 0: return []
     ref_unit = reference_vec / ref_len
 
-    parallel_edges = []
-
-    # 2. Check each edge
+    edges = []
     for i in range(4):
         p1 = pts[i]
         p2 = pts[(i + 1) % 4]
@@ -75,39 +65,39 @@ def get_parallel_edges(square_cnt, reference_vec):
         edge_vec = p2 - p1
         edge_len = np.linalg.norm(edge_vec)
         if edge_len == 0: continue
-        edge_unit = edge_vec / edge_len
         
-        # Dot product: 1.0 = Parallel, 0.0 = Perpendicular
-        alignment = abs(np.dot(edge_unit, ref_unit))
-        
-        # Threshold (0.8 allows for some perspective distortion ~36 degrees)
-        if alignment > 0.8:
-            parallel_edges.append((p1, p2))
-
-    return parallel_edges
+        alignment = abs(np.dot(edge_vec / edge_len, ref_unit))
+        if alignment > 0.8: # Parallel-ish
+            edges.append((p1, p2))
+            
+    return edges
 
 def process_image(path: Path, output_dir: Path):
     image = cv2.imread(str(path))
     if image is None: return
 
+    # 1. Setup Canvas
     vis = (image.astype(float) * COLOR_BG_TINT).astype(np.uint8)
 
-    # 1. Detect Anchors
+    # 2. Geometry & Anchors
     detector = ColoredCornerDetector()
     corners, masks = detector.detect_all_corners(image)
     
     if 'bottom_left' not in corners or 'top_left' not in corners:
-        print(f"Skipping {path.name}: Missing BL or TL.")
+        print(f"Skipping {path.name}: Missing BL/TL.")
         return
 
     bl = corners['bottom_left']
     tl = corners['top_left']
     
-    # 2. Generate Axis & Reference Vector
-    axis_pts = get_normal_axis_points(bl, tl, masks['red'], masks['red'])
+    # Calculate Board Center (Mean of all detected corners)
+    # This is our reference for "Inner" vs "Outer"
+    all_pts = np.array(list(corners.values()))
+    board_center = np.mean(all_pts, axis=0)
     
-    # Global direction vector (BL -> TL)
-    global_axis_vec = np.array(tl) - np.array(bl)
+    # Axis & Reference Vector
+    axis_pts = get_normal_axis_points(bl, tl, masks['red'], masks['red'])
+    ref_vec = np.array(tl) - np.array(bl) # Global Normal Vector
 
     # Draw Axis
     cv2.polylines(vis, [axis_pts.astype(np.int32)], False, COLOR_AXIS_GUIDE, 1)
@@ -123,46 +113,68 @@ def process_image(path: Path, output_dir: Path):
         
     squares, _ = get_contours_and_filter(mask_eroded)
 
-    # 4. Filter & Highlight
-    edge_count = 0
+    # 4. Filter Squares (On Axis) & Separate Edges
+    outer_count = 0
+    inner_count = 0
     
     for cnt in squares:
-        # Check intersection with axis
-        is_hit = False
+        # Check if square is on axis
+        on_axis = False
         for pt in axis_pts:
             if cv2.pointPolygonTest(cnt, (float(pt[0]), float(pt[1])), False) >= 0:
-                is_hit = True
+                on_axis = True
                 break
         
-        if is_hit:
-            # Draw selected square background
-            cv2.drawContours(vis, [cnt], -1, COLOR_SQUARE_SELECTED, -1)
+        if on_axis:
+            # Square Center
+            M = cv2.moments(cnt)
+            if M['m00'] == 0: continue
+            cx, cy = M['m10']/M['m00'], M['m01']/M['m00']
+            sq_center = np.array([cx, cy])
+
+            # Get Parallel Edges
+            edges = get_parallel_edges(cnt, ref_vec)
             
-            # Find and draw PARALLEL edges
-            edges = get_parallel_edges(cnt, global_axis_vec)
             for p1, p2 in edges:
+                edge_mid = (p1 + p2) / 2
+                
+                # CLASSIFICATION LOGIC:
+                # Compare distance to board_center
+                d_edge = np.linalg.norm(edge_mid - board_center)
+                d_square = np.linalg.norm(sq_center - board_center)
+                
+                if d_edge > d_square:
+                    # Edge is Farther -> OUTER SET
+                    color = COLOR_SET_OUTER
+                    outer_count += 1
+                else:
+                    # Edge is Closer -> INNER SET
+                    color = COLOR_SET_INNER
+                    inner_count += 1
+                
                 cv2.line(vis, tuple(p1.astype(int)), tuple(p2.astype(int)), 
-                         COLOR_EDGE_PARALLEL, 3, cv2.LINE_AA)
-                edge_count += 1
+                         color, 3, cv2.LINE_AA)
         else:
-            # Draw ignored square background
+            # Context squares
             cv2.drawContours(vis, [cnt], -1, COLOR_SQUARE_CONTEXT, -1)
 
-    # Status
-    cv2.putText(vis, f"Found {edge_count} Parallel Edges", (20, 40), 
-               cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLOR_EDGE_PARALLEL, 2)
+    # Legend
+    cv2.putText(vis, f"Outer Set (Cyan): {outer_count}", (20, 40), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_SET_OUTER, 2)
+    cv2.putText(vis, f"Inner Set (Magenta): {inner_count}", (20, 70), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_SET_INNER, 2)
 
-    out_path = output_dir / f"{path.stem}_parallel_edges.jpg"
+    out_path = output_dir / f"{path.stem}_separated.jpg"
     cv2.imwrite(str(out_path), vis)
     print(f"Saved: {out_path.name}")
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python step4_debug_parallel.py <image_directory>")
+        print("Usage: python step4_separate_edges.py <image_directory>")
         sys.exit(1)
 
     input_dir = Path(sys.argv[1])
-    output_dir = input_dir / "step4_debug_results"
+    output_dir = input_dir / "step4_separation_results"
     output_dir.mkdir(exist_ok=True)
 
     images = sorted(list(input_dir.glob('*.jpg')) + list(input_dir.glob('*.png')))
