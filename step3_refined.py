@@ -1,8 +1,15 @@
 """
-Checkerboard Reconstruction - Step 3 (Geometric & Erosion Pipeline)
+Checkerboard Reconstruction - Step 3 (Refined Pipeline)
+Robust separation and filtering of grid squares.
+
 Pipeline:
-1. Color Threshold -> 2. Erosion (Separation) -> 3. Geometric Filter (4-Corners)
-Visualizes every step in a 2x3 grid to debug exactly where detection fails.
+1. Color Threshold (Raw Mask)
+2. Erosion (Separation)
+3. Geometric Filter (4-Corners, Convexity)
+4. Aspect Ratio Filter (Shape validation)
+5. Statistical Area Filter (Removes tiny/huge outliers relative to median)
+
+Output: High-res 2x2 Grid.
 """
 
 import cv2
@@ -22,160 +29,207 @@ CONFIG = {
     },
 
     # 2. SEPARATION (Erosion)
-    # Toggle 'ENABLED' to False to see what happens without erosion
     'EROSION': {
         'ENABLED': True,
-        'ITERATIONS': 2,      # Higher = more separation (smaller squares)
-        'KERNEL_SIZE': 3      # 3x3 is standard
+        'ITERATIONS': 2,      
+        'KERNEL_SIZE': 3      
     },
 
-    # 3. GEOMETRIC FILTER (Shape Validation)
-    # Ensures the blob is actually a square/rectangle
+# 3. GEOMETRIC FILTER (Strict Shape)
     'GEOMETRY': {
         'ENABLED': True,
-        'MIN_CORNERS': 4,     # Must have 4 corners
-        'MAX_CORNERS': 4,     # Strictly 4 (Change to 5 or 6 if noisy)
-        'APPROX_EPSILON': 0.04, # Precision: 0.04 = 4% error allowed (Standard for squares)
-        'MIN_AREA': 50,       # Ignore tiny noise specks
-        'CONVEXITY': True     # Squares must be convex (no dents)
+        'MIN_CORNERS': 4,     
+        'MAX_CORNERS': 4,     
+        'APPROX_EPSILON': 0.04, 
+        'MIN_AREA': 50,       
+        'CONVEXITY': True,
+        
+        # [NEW] Solidity Filter (Strictness: High)
+        # Ratio of Area to ConvexHull. Perfect square = 1.0.
+        'SOLIDITY_ENABLED': True,
+        'MIN_SOLIDITY': 0.95  
+    },
+
+    # 4. ASPECT RATIO FILTER (Strictness: High)
+    # 1.0 is a perfect square. 1.3 allows mild perspective distortion.
+    # 2.0 allowed rectangles; we lowered this to reject them.
+    'ASPECT_RATIO': {
+        'ENABLED': False,
+        'MAX_RATIO': 1.35      
+    },
+
+    # 5. STATISTICAL AREA FILTER (New!)
+    # Rejects squares that are significantly smaller/larger than the median square
+    'STATISTICAL_AREA': {
+        'ENABLED': False,
+        'MODE': 'mean',   # 'median' or 'mean'
+        'MIN_FACTOR': 0.8,    # Min area = 0.8 * Mean
+        'MAX_FACTOR': 1.2     # Max area = 1.2 * Mean
     }
 }
 
 def preprocess_image(image: np.ndarray) -> np.ndarray:
-    """Convert to HSV and boost saturation."""
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
     hsv[:, :, 1] = np.clip(hsv[:, :, 1] * CONFIG['COLOR']['SATURATION_BOOST'], 0, 255)
     return hsv.astype(np.uint8)
 
-def apply_geometric_filter(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Filters contours to ensure they are 4-sided polygons.
-    Returns:
-        valid_mask: The clean mask with only squares.
-        rejected_mask: Mask of blobs that failed the test (for debugging).
-    """
-    if not CONFIG['GEOMETRY']['ENABLED']:
-        return mask, np.zeros_like(mask)
-
+def get_contours_and_filter(mask: np.ndarray) -> tuple[list, list]:
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    valid_mask = np.zeros_like(mask)
-    rejected_mask = np.zeros_like(mask)
-    
+    candidates = []
+    rejected = []
+
+    # --- PASS 1: Shape & Geometry ---
     for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < CONFIG['GEOMETRY']['MIN_AREA']:
-            continue # Too small to even track as rejected
+        if cv2.contourArea(cnt) < CONFIG['GEOMETRY']['MIN_AREA']:
+            continue 
 
-        # Approximate the polygon (simplifies jagged edges from erosion)
-        peri = cv2.arcLength(cnt, True)
-        epsilon = CONFIG['GEOMETRY']['APPROX_EPSILON'] * peri
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        reason = None
+        keep = True
         
-        is_square = True
-        
-        # Check 1: Corner Count
-        if not (CONFIG['GEOMETRY']['MIN_CORNERS'] <= len(approx) <= CONFIG['GEOMETRY']['MAX_CORNERS']):
-            is_square = False
+        # 1. Geometry (Corners & Convexity)
+        if CONFIG['GEOMETRY']['ENABLED']:
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, CONFIG['GEOMETRY']['APPROX_EPSILON'] * peri, True)
             
-        # Check 2: Convexity (squares can't be "caved in")
-        if CONFIG['GEOMETRY']['CONVEXITY'] and not cv2.isContourConvex(approx):
-            is_square = False
+            if not (CONFIG['GEOMETRY']['MIN_CORNERS'] <= len(approx) <= CONFIG['GEOMETRY']['MAX_CORNERS']):
+                keep = False
+            elif CONFIG['GEOMETRY']['CONVEXITY'] and not cv2.isContourConvex(approx):
+                keep = False
+            
+            # [NEW] Solidity Check
+            if keep and CONFIG['GEOMETRY']['SOLIDITY_ENABLED']:
+                area = cv2.contourArea(cnt)
+                hull = cv2.convexHull(cnt)
+                hull_area = cv2.contourArea(hull)
+                if hull_area > 0:
+                    solidity = area / hull_area
+                    if solidity < CONFIG['GEOMETRY']['MIN_SOLIDITY']:
+                        keep = False
+                else:
+                    keep = False
 
-        if is_square:
-            cv2.drawContours(valid_mask, [cnt], -1, 255, -1)
+        # 2. Aspect Ratio
+        if keep and CONFIG['ASPECT_RATIO']['ENABLED']:
+            rect = cv2.minAreaRect(cnt)
+            w, h = rect[1]
+            if min(w, h) > 0:
+                ar = max(w, h) / min(w, h)
+                if ar > CONFIG['ASPECT_RATIO']['MAX_RATIO']:
+                    keep = False
+            else:
+                keep = False
+
+        if keep:
+            candidates.append(cnt)
         else:
-            cv2.drawContours(rejected_mask, [cnt], -1, 255, -1)
-            
-    return valid_mask, rejected_mask
+            rejected.append(cnt)
 
-def create_debug_grid(original, mask_raw, mask_eroded, mask_valid, mask_rejected, final_overlay):
-    """Creates a 2x3 visualization grid."""
+    # --- PASS 2: Statistical Area (Group Consistency) ---
+    final_accepted = []
+    
+    if CONFIG['STATISTICAL_AREA']['ENABLED'] and len(candidates) > 2:
+        areas = [cv2.contourArea(c) for c in candidates]
+
+        mode = CONFIG['STATISTICAL_AREA'].get('MODE', 'median').lower()
+        if mode == 'mean':
+            center_area = float(np.mean(areas))
+        else:
+            center_area = float(np.median(areas))
+        
+        lower_bound = center_area * CONFIG['STATISTICAL_AREA']['MIN_FACTOR']
+        upper_bound = center_area * CONFIG['STATISTICAL_AREA']['MAX_FACTOR']
+        
+        for cnt in candidates:
+            area = cv2.contourArea(cnt)
+            if lower_bound <= area <= upper_bound:
+                final_accepted.append(cnt)
+            else:
+                rejected.append(cnt)
+    else:
+        final_accepted = candidates
+
+    return final_accepted, rejected
+
+def create_high_res_grid(original, mask_raw, mask_eroded, accepted, rejected):
     h, w = original.shape[:2]
     
-    def label_img(img, text, color=(255, 255, 255), bg=(0,0,0)):
-        # Convert grayscale masks to BGR for display
+    def add_label(img, text, color=(255, 255, 255), bg=(0,0,0)):
         if len(img.shape) == 2:
             vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         else:
             vis = img.copy()
             
-        cv2.rectangle(vis, (0, 0), (w, 50), bg, -1)
-        cv2.putText(vis, text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        font_scale = w / 600.0 
+        thickness = max(2, int(w / 300.0))
+        bar_h = int(h * 0.08)
+        
+        cv2.rectangle(vis, (0, 0), (w, bar_h), bg, -1)
+        text_y = int(bar_h * 0.7)
+        cv2.putText(vis, text, (20, text_y), cv2.FONT_HERSHEY_SIMPLEX, 
+                   font_scale, color, thickness, cv2.LINE_AA)
         return vis
 
-    # Row 1
-    p1 = label_img(original, "1. Original")
-    p2 = label_img(mask_raw, "2. Color Mask (Raw)", (255, 255, 0))
-    p3 = label_img(mask_eroded, f"3. Eroded (Iter={CONFIG['EROSION']['ITERATIONS']})", (0, 255, 255))
+    # Final Result Panel
+    final_vis = (original.astype(float) * 0.3).astype(np.uint8)
     
-    # Row 2
-    p4 = label_img(mask_valid, "4. Geometric Filter (Valid)", (0, 255, 0))
-    p5 = label_img(mask_rejected, "5. Rejected (Failed Shape)", (0, 0, 255)) # Red text
-    p6 = label_img(final_overlay, "6. Final Result", (255, 0, 255))
+    # Draw Rejected (Red) - Thinner line
+    cv2.drawContours(final_vis, rejected, -1, (0, 0, 255), 1)
+    
+    # Draw Accepted (Green) - Filled
+    cv2.drawContours(final_vis, accepted, -1, (0, 255, 0), -1)
+    # White outline for pop
+    cv2.drawContours(final_vis, accepted, -1, (255, 255, 255), 2)
 
-    # Stack
-    row1 = np.hstack([p1, p2, p3])
-    row2 = np.hstack([p4, p5, p6])
-    grid = np.vstack([row1, row2])
+    # Assemble
+    p1 = add_label(original, "1. Original")
+    p2 = add_label(mask_raw, "2. Color Mask", (255, 200, 200))
+    p3 = add_label(mask_eroded, f"3. Eroded (Iter={CONFIG['EROSION']['ITERATIONS']})", (200, 255, 255))
     
-    # Resize
-    if grid.shape[1] > 2000:
-        scale = 2000 / grid.shape[1]
-        grid = cv2.resize(grid, None, fx=scale, fy=scale)
-        
-    return grid
+    stats = f"4. Result: {len(accepted)} OK | {len(rejected)} Drop"
+    p4 = add_label(final_vis, stats, (150, 255, 150))
+
+    row1 = np.hstack([p1, p2])
+    row2 = np.hstack([p3, p4])
+    return np.vstack([row1, row2])
 
 def process_image(path: Path, output_dir: Path):
     image = cv2.imread(str(path))
     if image is None: return
 
-    # 1. Preprocess
+    # Pipeline
     hsv = preprocess_image(image)
-
-    # 2. Raw Color Mask
     mask_raw = cv2.inRange(hsv, CONFIG['COLOR']['LOWER'], CONFIG['COLOR']['UPPER'])
-
-    # 3. Apply Erosion
+    
     if CONFIG['EROSION']['ENABLED']:
         kernel = np.ones((CONFIG['EROSION']['KERNEL_SIZE'], CONFIG['EROSION']['KERNEL_SIZE']), np.uint8)
         mask_eroded = cv2.erode(mask_raw, kernel, iterations=CONFIG['EROSION']['ITERATIONS'])
     else:
         mask_eroded = mask_raw.copy()
 
-    # 4. Apply Geometric Filter
-    mask_valid, mask_rejected = apply_geometric_filter(mask_eroded)
-
-    # 5. Final Overlay
-    overlay = (image.astype(float) * 0.4).astype(np.uint8)
-    # Paint Valid Green
-    overlay[mask_valid > 0] = [0, 255, 0]
-    # Paint Rejected Red (faintly)
-    overlay[mask_rejected > 0] = [0, 0, 255]
-
-    # Build Grid
-    grid = create_debug_grid(image, mask_raw, mask_eroded, mask_valid, mask_rejected, overlay)
-
-    out_path = output_dir / f"{path.stem}_step3_grid.jpg"
+    accepted, rejected = get_contours_and_filter(mask_eroded)
+    
+    grid = create_high_res_grid(image, mask_raw, mask_eroded, accepted, rejected)
+    
+    out_path = output_dir / f"{path.stem}_refined.jpg"
     cv2.imwrite(str(out_path), grid)
-    print(f"Saved: {out_path.name}")
+    print(f"Saved: {out_path.name} | Accepted: {len(accepted)}")
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python step3_filtered_grid.py <image_directory>")
+        print("Usage: python step3_refined.py <image_directory>")
         sys.exit(1)
 
     input_dir = Path(sys.argv[1])
-    output_dir = input_dir / "step3_results"
+    output_dir = input_dir / "step3_refined_results"
     output_dir.mkdir(exist_ok=True)
 
     images = sorted(list(input_dir.glob('*.jpg')) + list(input_dir.glob('*.png')))
-    print(f"Processing {len(images)} images with CONFIG settings...")
-
+    print(f"Processing {len(images)} images with filters...")
     for img in images:
         process_image(img, output_dir)
 
-    print(f"\nResults saved to {output_dir}")
+    print(f"\nDone. Results in {output_dir}")
 
 if __name__ == "__main__":
     main()
