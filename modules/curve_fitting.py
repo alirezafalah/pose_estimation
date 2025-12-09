@@ -102,36 +102,58 @@ class CurveFitter:
         
         return best
     
-    def fit_curve(self, 
-                 corners: Dict[str, Tuple[int, int]],
-                 masks: Dict[str, np.ndarray],
-                 grid_contours: List,
-                 axis_points: np.ndarray) -> Tuple[List[np.ndarray], np.ndarray]:
+    def fit_curve_along_axis(self,
+                            corners: Dict[str, Tuple[int, int]],
+                            masks: Dict[str, np.ndarray],
+                            grid_contours: List,
+                            axis_points: np.ndarray,
+                            axis_type: str = 'normal') -> Tuple[List[np.ndarray], np.ndarray]:
         """
-        Fit curve along grid edges.
+        Fit curve along grid edges for a specific axis.
         
         Args:
             corners: Dict of corner positions
             masks: Dict of corner masks
             grid_contours: List of grid square contours
             axis_points: Points along the axis
+            axis_type: 'normal' (vertical/left edge) or 'tangent' (horizontal/bottom edge)
             
         Returns:
             Tuple of (fit_points, curve_points)
         """
-        if 'bottom_left' not in corners or 'top_left' not in corners:
-            return [], np.array([])
-        
-        bl_pt = corners['bottom_left']
-        tl_pt = corners['top_left']
         board_center = np.mean(list(corners.values()), axis=0)
         
-        ref_vec = np.array(tl_pt) - np.array(bl_pt)
+        # Determine which corners and reference vector to use based on axis type
+        if axis_type == 'normal':
+            # Vertical axis (left edge): bottom-left to top-left
+            if 'bottom_left' not in corners or 'top_left' not in corners:
+                return [], np.array([])
+            
+            origin_pt = corners['bottom_left']
+            target_pt = corners['top_left']
+            ref_vec = np.array(target_pt) - np.array(origin_pt)
+            
+            # Get corner contours (both red)
+            origin_cnt = self.get_contour_from_mask(masks['red'], origin_pt)
+            target_cnt = self.get_contour_from_mask(masks['red'], target_pt)
+            corner_contours = [c for c in [origin_cnt, target_cnt] if c is not None]
         
-        # Get corner contours
-        bl_cnt = self.get_contour_from_mask(masks['red'], bl_pt)
-        tl_cnt = self.get_contour_from_mask(masks['red'], tl_pt)
-        corner_contours = [c for c in [bl_cnt, tl_cnt] if c is not None]
+        elif axis_type == 'tangent':
+            # Horizontal axis (bottom edge): bottom-left to bottom-right
+            if 'bottom_left' not in corners or 'bottom_right' not in corners:
+                return [], np.array([])
+            
+            origin_pt = corners['bottom_left']
+            target_pt = corners['bottom_right']
+            ref_vec = np.array(target_pt) - np.array(origin_pt)
+            
+            # Get corner contours (red and yellow)
+            origin_cnt = self.get_contour_from_mask(masks['red'], origin_pt)
+            target_cnt = self.get_contour_from_mask(masks['yellow'], target_pt)
+            corner_contours = [c for c in [origin_cnt, target_cnt] if c is not None]
+        
+        else:
+            raise ValueError(f"Unknown axis_type: {axis_type}. Use 'normal' or 'tangent'.")
         
         # Find squares touched by axis
         touched_squares = []
@@ -147,24 +169,18 @@ class CurveFitter:
         # Collect fit points
         fit_points = []
         
-        # Process corners - pick specific vertices
-        for c in corner_contours:
+        # Process corners - add BOTH endpoints of the outward edge
+        # This ensures the curve spans the full width/height of corner markers
+        for idx, c in enumerate(corner_contours):
             edges = self.get_edges(c)
             para_edges = self.filter_parallel_edges(edges, ref_vec)
             e = self.get_outward_edge(para_edges, board_center)
             
             if e:
-                mid = (e[0] + e[1]) / 2
-                is_tl = np.linalg.norm(mid - tl_pt) < np.linalg.norm(mid - bl_pt)
-                
-                if is_tl:
-                    # Top-Left: Pick top vertex (Min Y)
-                    pt = e[0] if e[0][1] < e[1][1] else e[1]
-                else:
-                    # Bottom-Left: Pick bottom vertex (Max Y)
-                    pt = e[0] if e[0][1] > e[1][1] else e[1]
-                
-                fit_points.append(pt)
+                # Add both endpoints of the edge
+                # This captures the full span of the corner square's outward edge
+                fit_points.append(e[0])
+                fit_points.append(e[1])
         
         # Process squares - pick midpoints
         for s in touched_squares:
@@ -181,24 +197,56 @@ class CurveFitter:
         
         if len(fit_points) >= 2:
             pts = np.array(fit_points)
-            x = pts[:, 0]
-            y = pts[:, 1]
             
-            # Sort by Y
-            order = np.argsort(y)
-            x, y = x[order], y[order]
+            if axis_type == 'normal':
+                # Vertical axis: fit X = f(Y)
+                x = pts[:, 0]
+                y = pts[:, 1]
+                
+                # Sort by Y
+                order = np.argsort(y)
+                x, y = x[order], y[order]
+                
+                try:
+                    poly = np.polyfit(y, x, self.config['POLY_DEGREE'])
+                    f = np.poly1d(poly)
+                    
+                    y_range = np.linspace(y[0], y[-1], self.config['SAMPLE_POINTS'])
+                    x_range = f(y_range)
+                    
+                    curve_points = np.column_stack((x_range, y_range)).astype(np.int32)
+                except:
+                    pass
             
-            try:
-                # Fit X = f(Y)
-                poly = np.polyfit(y, x, self.config['POLY_DEGREE'])
-                f = np.poly1d(poly)
+            else:  # tangent
+                # Horizontal axis: fit Y = f(X)
+                x = pts[:, 0]
+                y = pts[:, 1]
                 
-                # Evaluate from first to last point
-                y_range = np.linspace(y[0], y[-1], self.config['SAMPLE_POINTS'])
-                x_range = f(y_range)
+                # Sort by X
+                order = np.argsort(x)
+                x, y = x[order], y[order]
                 
-                curve_points = np.column_stack((x_range, y_range)).astype(np.int32)
-            except:
-                pass
+                try:
+                    poly = np.polyfit(x, y, self.config['POLY_DEGREE'])
+                    f = np.poly1d(poly)
+                    
+                    x_range = np.linspace(x[0], x[-1], self.config['SAMPLE_POINTS'])
+                    y_range = f(x_range)
+                    
+                    curve_points = np.column_stack((x_range, y_range)).astype(np.int32)
+                except:
+                    pass
         
         return fit_points, curve_points
+    
+    def fit_curve(self, 
+                 corners: Dict[str, Tuple[int, int]],
+                 masks: Dict[str, np.ndarray],
+                 grid_contours: List,
+                 axis_points: np.ndarray) -> Tuple[List[np.ndarray], np.ndarray]:
+        """
+        Legacy method - fits curve along normal axis only.
+        For compatibility with existing code.
+        """
+        return self.fit_curve_along_axis(corners, masks, grid_contours, axis_points, 'normal')

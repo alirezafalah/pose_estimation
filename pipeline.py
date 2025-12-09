@@ -69,16 +69,32 @@ class PoseEstimationPipeline:
         results['grid_mask_raw'] = mask_raw
         results['grid_mask_processed'] = mask_processed
         
-        # Step 5: Curve Fitting (if we have normal axis)
+        # Step 5: Curve Fitting
+        # Fit curve along normal axis (left edge)
         if 'normal' in axes and len(grid_accepted) > 0:
-            fit_points, curve = self.curve_fitter.fit_curve(
-                corners, corner_masks, grid_accepted, axes['normal']
+            fit_points_normal, curve_normal = self.curve_fitter.fit_curve_along_axis(
+                corners, corner_masks, grid_accepted, axes['normal'], 'normal'
             )
-            results['fit_points'] = fit_points
-            results['curve'] = curve
+            results['fit_points_normal'] = fit_points_normal
+            results['curve_normal'] = curve_normal
         else:
-            results['fit_points'] = []
-            results['curve'] = np.array([])
+            results['fit_points_normal'] = []
+            results['curve_normal'] = np.array([])
+        
+        # Fit curve along tangent axis (bottom edge)
+        if 'tangent' in axes and len(grid_accepted) > 0:
+            fit_points_tangent, curve_tangent = self.curve_fitter.fit_curve_along_axis(
+                corners, corner_masks, grid_accepted, axes['tangent'], 'tangent'
+            )
+            results['fit_points_tangent'] = fit_points_tangent
+            results['curve_tangent'] = curve_tangent
+        else:
+            results['fit_points_tangent'] = []
+            results['curve_tangent'] = np.array([])
+        
+        # Legacy fields for backward compatibility
+        results['fit_points'] = results['fit_points_normal']
+        results['curve'] = results['curve_normal']
         
         return results
     
@@ -119,46 +135,66 @@ class PoseEstimationPipeline:
         cv2.drawContours(v3, grid_rejected, -1, self.viz_colors['IGNORED'], 1)
         cv2.drawContours(v3, grid_accepted, -1, self.viz_colors['SQUARE_FILL'], -1)
         
-        # Panel 4: Touched Squares
+        # Panel 4: Touched Squares (Both Axes)
         v4 = base_vis.copy()
+        cv2.drawContours(v4, grid_accepted, -1, self.viz_colors['IGNORED'], -1)
+        
+        # Draw normal axis and touched squares
         if 'normal' in axes and len(grid_accepted) > 0:
             axis_pts = axes['normal']
-            touched = []
-            ignored = []
-            
             for cnt in grid_accepted:
-                hit = False
                 for pt in axis_pts:
                     if cv2.pointPolygonTest(cnt, (float(pt[0]), float(pt[1])), False) >= 0:
-                        hit = True
+                        cv2.drawContours(v4, [cnt], -1, (0, 100, 150), -1)  # Blue tint
                         break
-                if hit:
-                    touched.append(cnt)
-                else:
-                    ignored.append(cnt)
-            
-            cv2.drawContours(v4, ignored, -1, self.viz_colors['IGNORED'], -1)
-            cv2.drawContours(v4, touched, -1, self.viz_colors['SQUARE_FILL'], -1)
-            cv2.polylines(v4, [axis_pts.astype(np.int32)], False, self.viz_colors['AXIS'], 2)
+            cv2.polylines(v4, [axis_pts.astype(np.int32)], False, (0, 255, 0), 2)
         
-        # Panel 5: Fit Points
+        # Draw tangent axis and touched squares
+        if 'tangent' in axes and len(grid_accepted) > 0:
+            axis_pts = axes['tangent']
+            for cnt in grid_accepted:
+                for pt in axis_pts:
+                    if cv2.pointPolygonTest(cnt, (float(pt[0]), float(pt[1])), False) >= 0:
+                        cv2.drawContours(v4, [cnt], -1, (150, 0, 100), -1)  # Magenta tint
+                        break
+            cv2.polylines(v4, [axis_pts.astype(np.int32)], False, (255, 0, 255), 2)
+        
+        # Panel 5: Fit Points (Both Axes)
         v5 = base_vis.copy()
-        fit_points = results.get('fit_points', [])
-        for pt in fit_points:
-            cv2.circle(v5, tuple(pt.astype(int)), 5, self.viz_colors['MIDPOINTS'], -1)
         
-        # Panel 6: Final Curve
+        # Normal axis fit points (green)
+        fit_points_normal = results.get('fit_points_normal', [])
+        for pt in fit_points_normal:
+            cv2.circle(v5, tuple(pt.astype(int)), 5, (0, 255, 0), -1)
+        
+        # Tangent axis fit points (magenta)
+        fit_points_tangent = results.get('fit_points_tangent', [])
+        for pt in fit_points_tangent:
+            cv2.circle(v5, tuple(pt.astype(int)), 5, (255, 0, 255), -1)
+        
+        # Panel 6: Final Curves (Both)
         v6 = base_vis.copy()
         cv2.drawContours(v6, grid_accepted, -1, self.viz_colors['IGNORED'], -1)
-        curve = results.get('curve', np.array([]))
-        if len(curve) > 0:
-            cv2.polylines(v6, [curve], False, self.viz_colors['FINAL_LINE'], 3, cv2.LINE_AA)
-            # Mark endpoints
-            if len(fit_points) >= 2:
-                pts = np.array(fit_points)
+        
+        # Normal curve (left edge - cyan)
+        curve_normal = results.get('curve_normal', np.array([]))
+        if len(curve_normal) > 0:
+            cv2.polylines(v6, [curve_normal], False, (0, 255, 255), 3, cv2.LINE_AA)
+            if len(fit_points_normal) >= 2:
+                pts = np.array(fit_points_normal)
                 y_order = np.argsort(pts[:, 1])
                 cv2.circle(v6, tuple(pts[y_order[0]].astype(int)), 6, (0, 255, 0), -1)
                 cv2.circle(v6, tuple(pts[y_order[-1]].astype(int)), 6, (0, 255, 0), -1)
+        
+        # Tangent curve (bottom edge - yellow)
+        curve_tangent = results.get('curve_tangent', np.array([]))
+        if len(curve_tangent) > 0:
+            cv2.polylines(v6, [curve_tangent], False, (0, 255, 255), 3, cv2.LINE_AA)
+            if len(fit_points_tangent) >= 2:
+                pts = np.array(fit_points_tangent)
+                x_order = np.argsort(pts[:, 0])
+                cv2.circle(v6, tuple(pts[x_order[0]].astype(int)), 6, (255, 0, 255), -1)
+                cv2.circle(v6, tuple(pts[x_order[-1]].astype(int)), 6, (255, 0, 255), -1)
         
         # Create grid with labels
         row1 = np.hstack([
@@ -168,8 +204,8 @@ class PoseEstimationPipeline:
         ])
         row2 = np.hstack([
             add_label_to_image(v4, "4. Touched Squares"),
-            add_label_to_image(v5, "5. Fit Points"),
-            add_label_to_image(v6, "6. Final Curve")
+            add_label_to_image(v5, "5. Fit Points (Green=Normal, Magenta=Tangent)"),
+            add_label_to_image(v6, "6. Both Curves (Cyan)")
         ])
         
         return np.vstack([row1, row2])
@@ -225,9 +261,17 @@ def main():
         # Print summary
         n_corners = len(results.get('corners', {}))
         n_grid = len(results.get('grid_accepted', []))
-        has_curve = len(results.get('curve', np.array([]))) > 0
+        has_curve_normal = len(results.get('curve_normal', np.array([]))) > 0
+        has_curve_tangent = len(results.get('curve_tangent', np.array([]))) > 0
         
-        print(f"  Corners: {n_corners}/4 | Grid squares: {n_grid} | Curve: {'✓' if has_curve else '✗'}")
+        curve_status = []
+        if has_curve_normal:
+            curve_status.append('Normal')
+        if has_curve_tangent:
+            curve_status.append('Tangent')
+        curve_str = '+'.join(curve_status) if curve_status else '✗'
+        
+        print(f"  Corners: {n_corners}/4 | Grid: {n_grid} | Curves: {curve_str}")
         
         # Save visualization if requested
         if args.visualize:
