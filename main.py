@@ -115,6 +115,8 @@ def get_camera_position_and_orientation(rvec, tvec):
     
     The rvec and tvec from solvePnP give the board pose in camera coordinates.
     We need to invert this to get camera pose in board (world) coordinates.
+    
+    Returns position, forward vector, up vector, rotation matrix, and quaternion (w, x, y, z).
     """
     # Convert rotation vector to rotation matrix
     R_board_to_cam, _ = cv2.Rodrigues(rvec)
@@ -132,16 +134,23 @@ def get_camera_position_and_orientation(rvec, tvec):
     # Camera up direction (Y-axis)
     camera_up = R_cam_to_world @ np.array([[0], [-1], [0]])
     
-    return camera_position.flatten(), camera_forward.flatten(), camera_up.flatten(), R_cam_to_world
+    # Convert rotation matrix to quaternion using scipy
+    rotation = R.from_matrix(R_cam_to_world)
+    quaternion = rotation.as_quat()  # Returns [x, y, z, w]
+    # Reorder to [w, x, y, z] which is more common in literature
+    quaternion_wxyz = np.array([quaternion[3], quaternion[0], quaternion[1], quaternion[2]])
+    
+    return camera_position.flatten(), camera_forward.flatten(), camera_up.flatten(), R_cam_to_world, quaternion_wxyz
 
 
 def process_images(image_folder, dictionary, board, camera_matrix, dist_coeffs):
     """Process all images in the folder and estimate poses."""
-    # Find all image files
-    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.JPG', '*.JPEG', '*.PNG']
-    image_paths = []
+    # Find all image files (use set to avoid duplicates on case-insensitive filesystems)
+    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff']
+    image_paths = set()
     for ext in image_extensions:
-        image_paths.extend(glob.glob(os.path.join(image_folder, ext)))
+        image_paths.update(glob.glob(os.path.join(image_folder, ext), recursive=False))
+    image_paths = list(image_paths)
     
     if not image_paths:
         print(f"❌ No images found in {image_folder}")
@@ -184,9 +193,10 @@ def process_images(image_folder, dictionary, board, camera_matrix, dist_coeffs):
             continue
         
         # Get camera position and orientation in world coordinates
-        cam_pos, cam_forward, cam_up, R_cam = get_camera_position_and_orientation(rvec, tvec)
+        cam_pos, cam_forward, cam_up, R_cam, quaternion = get_camera_position_and_orientation(rvec, tvec)
         
         print(f"  ✓ Camera position: [{cam_pos[0]:.3f}, {cam_pos[1]:.3f}, {cam_pos[2]:.3f}] m")
+        print(f"  ✓ Quaternion (w,x,y,z): [{quaternion[0]:.4f}, {quaternion[1]:.4f}, {quaternion[2]:.4f}, {quaternion[3]:.4f}]")
         
         results.append({
             'filename': filename,
@@ -199,6 +209,7 @@ def process_images(image_folder, dictionary, board, camera_matrix, dist_coeffs):
             'camera_forward': cam_forward,
             'camera_up': cam_up,
             'R_cam': R_cam,
+            'quaternion': quaternion,
             'num_markers': num_markers
         })
         
@@ -426,18 +437,19 @@ def create_interactive_3d_visualization(results, board_width_m, board_height_m):
 
 
 def print_pose_summary(results):
-    """Print a summary table of all camera poses."""
-    print("\n" + "=" * 80)
+    """Print a summary table of all camera poses including quaternion orientations."""
+    print("\n" + "=" * 100)
     print("📊 CAMERA POSE SUMMARY")
-    print("=" * 80)
-    print(f"{'Image':<30} {'Markers':>8} {'X (m)':>10} {'Y (m)':>10} {'Z (m)':>10}")
-    print("-" * 80)
+    print("=" * 100)
+    print(f"{'Image':<25} {'#':>4} {'X(m)':>8} {'Y(m)':>8} {'Z(m)':>8} │ {'qw':>7} {'qx':>7} {'qy':>7} {'qz':>7}")
+    print("-" * 100)
     
     for i, r in enumerate(results):
         pos = r['camera_position']
-        print(f"{r['filename']:<30} {r['num_markers']:>8} {pos[0]:>10.3f} {pos[1]:>10.3f} {pos[2]:>10.3f}")
+        q = r['quaternion']
+        print(f"{r['filename']:<25} {r['num_markers']:>4} {pos[0]:>8.3f} {pos[1]:>8.3f} {pos[2]:>8.3f} │ {q[0]:>7.4f} {q[1]:>7.4f} {q[2]:>7.4f} {q[3]:>7.4f}")
     
-    print("-" * 80)
+    print("-" * 100)
     
     # Calculate relative distances between cameras
     print("\n📐 RELATIVE DISTANCES BETWEEN CAMERAS (meters):")
