@@ -9,6 +9,7 @@ This is NOT computationally expensive - it's just a simple projection using
 the estimated rotation and translation vectors.
 """
 
+import argparse
 import cv2
 import numpy as np
 import glob
@@ -287,7 +288,17 @@ def calculate_reprojection_error(detected_corners, detected_ids, board, rvec, tv
     }
 
 
-def validate_all_images():
+def _resolve_path(script_dir: str, path_value: str | None, default_rel: str) -> str:
+    if path_value is None:
+        return os.path.join(script_dir, default_rel)
+    if os.path.isabs(path_value):
+        return path_value
+    return os.path.join(script_dir, path_value)
+
+
+def validate_all_images(image_folder: str | None = None,
+                        output_folder: str | None = None,
+                        rotate_to_portrait: bool = ROTATE_LANDSCAPE_TO_PORTRAIT):
     """Process all images and create validation visualizations."""
     print("=" * 80)
     print("🔍 Pose Estimation Validation")
@@ -304,8 +315,8 @@ def validate_all_images():
     
     # Get paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    image_folder = os.path.join(script_dir, IMAGE_FOLDER)
-    output_folder = os.path.join(script_dir, OUTPUT_FOLDER)
+    image_folder = _resolve_path(script_dir, image_folder, IMAGE_FOLDER)
+    output_folder = _resolve_path(script_dir, output_folder, OUTPUT_FOLDER)
     os.makedirs(output_folder, exist_ok=True)
     
     # Find images (avoid duplicates)
@@ -333,7 +344,7 @@ def validate_all_images():
             print(f"  ⚠️ Could not load image")
             continue
         
-        if ROTATE_LANDSCAPE_TO_PORTRAIT:
+        if rotate_to_portrait:
             image = rotate_image_to_portrait(image)
         
         # Detect markers
@@ -400,4 +411,18 @@ def validate_all_images():
 
 
 if __name__ == "__main__":
-    validate_all_images()
+    parser = argparse.ArgumentParser(
+        description="Validate ArUco board pose by projecting board lines onto images.")
+    parser.add_argument("--image-folder", type=str, default=None,
+                        help="Path to input images (default: test_data/ChArUco)")
+    parser.add_argument("--output-folder", type=str, default=None,
+                        help="Path to output images (default: test_data/pose_validation)")
+    parser.add_argument("--no-rotate", action="store_true",
+                        help="Disable landscape-to-portrait rotation")
+    args = parser.parse_args()
+
+    validate_all_images(
+        image_folder=args.image_folder,
+        output_folder=args.output_folder,
+        rotate_to_portrait=not args.no_rotate
+    )
